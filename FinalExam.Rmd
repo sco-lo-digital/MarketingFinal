@@ -1,0 +1,374 @@
+---
+title: "Marketing Analytics FinalExam"
+author: "Scott Jacobs"
+date: "March 26, 2016"
+output: 
+    html_document:
+        theme: spacelab
+        highlight: kate
+    
+---
+
+
+##Data Preparation
+
+After a cursory analysis of the data, a decision was made to aggregate seasons at the player level and to sum the performance totals of each player for the two seasons. Due to the large number of observations with very few games played, a decision was also made to filter out those players that had not played at least 75% of games over two season period (162 games x 2 = 324). This worked out to be approximately 240 games. This left us with 85 high quality observations, but one observation was an outlier that appeared to be skewing the data. It was the highest paid player in the data set with only average performance based on the data. It was removed, leaving 84 observations to analyze and model.
+
+
+
+```{r LOADING, echo=FALSE, message=FALSE, warning=FALSE}
+library(pacman)
+p_load(Hmisc, magrittr, caret, corrplot, rpart, rattle, MASS, ggbiplot, AppliedPredictiveModeling, pairsD3, conjoint, PerformanceAnalytics, printr)
+
+#load data
+Baseball <- read.csv("~/Data_Science/MarketingAnalytics/Baseball.csv", stringsAsFactors=FALSE)
+#clean up salary, chr to numeric
+Baseball$SALARY <- as.numeric(Baseball$SALARY)
+#aggregate player year/salaries
+clean_df <- aggregate(cbind(G,AB, R, H, X2B, X3B, HR, RBI, SB, CS, BB, SO, IBB, HBP, SH, SF, GIDP, SALARY) ~ playerID, sum, data = Baseball)
+clean_df <- clean_df[clean_df$SALARY>0,]
+#Check out data set
+str(clean_df)
+#filter out observations with less than 240 games played
+filtered_df <- clean_df[clean_df$G>240,] 
+#Remove outlier jennide01 with highest salary and performance not commensurate with salary.
+filtered_df <- filtered_df[filtered_df$SALARY<35000000,]
+#Check out the data set
+str(filtered_df)
+```
+
+There are some things we don't know about our data. For instance, we might like to know how many years or seasons each player has been in the leauge because we know that players who are proven over several seasons will likely command a higher salary. Disambiguating that part of our data might allow for a more clear relationship to appear between performance and Salary. Moreover, we are not sure when this salary figure is being paid. Due to the nature of pro sports, players are often rewarded with contracts **after** a period of high performance. Because of the lagged nature of this relationship, identifying the performance attributable to the period in which salary was paid might be also be helpful in uncovering relationships between performance and salary.
+
+##Exploratory Analysis
+
+To observe the interactions of covariates with each other, we first explore a variety of pair plots. Observations are grouped by whether or not they have hit more than 10 home runs. While there are no ground breaking observations here, one might be surprised by the negative correlation of triples with home runs. Perhaps hitting for power and hitting for extra bases are relatively mutually exclusive.
+
+
+
+```{r EXPLORATORY, message=FALSE, warning=FALSE}
+chart.Correlation(filtered_df[2:8], pch=21) 
+chart.Correlation(filtered_df[9:14], pch=21)
+chart.Correlation(filtered_df[15:18], pch=21)
+```
+
+##Target Exploration: Salary
+
+Now we look at the target, Salary, versus the variables in our data. In all of these charts, Salary is on the y-axis. Although we do not observe any outright pure positive linear relationships with the target, we do so slightly positive patterns in offensive high performance categories such as R and BB. Perhaps, we would expect a more positive relationship between Salary and HR, but it appears there are a cluster of observations where big time HR hitters are not yet commanding a high salary. Also of note is the kinked nature of the loess curve for SO - a moderate number of strike outs actually appear to have a positive relationship with Salary. This actually makes a bit of sense as heavy hitters also tend to have high strike out rates.
+
+```{r fig.height=10}
+regVar <- c("G","AB", "R", "H", "X2B", "X3B", "HR", "RBI", "SB", "CS", "BB", "SO", "IBB", "HBP", "SH", "SF", "GIDP")
+featurePlot(x = filtered_df[, regVar],
+            y = filtered_df$SALARY,
+            plot = "scatter",
+            type = c("p", "smooth"),
+            layout = c(3, 6), main="Univariate Plots vs Salary")
+```
+
+Finally, we look at correlation among the variables and specifically the correlation of covariates with the target. It appears that SB and CS have a slightly negative correlation, while G, AB, R, H, X2B, and RBI have a slightly positive correlation with the target.
+
+```{r CORRPLOT, fig.width=5, echo=F}
+#Correlation analysis
+descrCor <-  cor(filtered_df[,-1])
+highCorr <- sum(abs(descrCor[upper.tri(descrCor)]) > .8)
+highlyCorDescr <- findCorrelation(descrCor, cutoff = .90)
+#Correlation Plot
+identifyPlot1 <- corrplot(descrCor, type="lower", tl.pos ="ld", tl.cex = .58)
+```
+
+##Question 1 - Does Salary Reward Performance? (25 pts)
+
+We have already started to examine the relationship of performance with salary, but to understand the quantitative impact of a specific performance category on a player's salary we might want to do a linear regression.
+
+Because we are not building a predictive model, but rather trying to understand our data, the decision was made not to use a training and a test set for this part of the analysis.
+
+First, we attempt a regression with all of the variables, knowing that this is likely only a starting point in our evaluation.
+
+```{r}
+lm.ball <- lm(SALARY~., data = filtered_df[,2:19])
+summary(lm.ball)
+```
+
+The resulting R sq of .27, meaning that our model explains about 27% of the variance in the data, is not terrible. The p-value of 13.4% suggests that there is only a 13% chance that our results or more extreme results would occur if the null hypothesis were true. The null in this case is that there is no statistical relationship between our co-variates and our target. 
+
+And while our model doesn't seem bad at first glance, we are looking for explanations and there are coefficients in our model that both do and do not make sense. Many of our co-variates are not statistically significant. Apparently, in this model players are rewarded for G played, but not for AB (which is highly significant at p = .042). This seems to be a bit counter-intuitive. 
+
+In order to evaluate if a better model exists, we can evaluate several stepwise approaches to the model. The backward approach gives us a model with 5 variables that has a lower overall R sq (19%), but also has variables that are more statistically significant.
+
+
+```{r STEPWISES, message=FALSE, warning=FALSE}
+step <- stepAIC(lm.ball, direction = "backward", trace = FALSE)
+step1 <- stepAIC(lm.ball, direction = "forward", trace = FALSE)
+step2 <- stepAIC(lm.ball, direction = "both", trace = FALSE)
+anova(step, step1, step2)
+lm.ball2 <- lm(SALARY~G + AB + R + SB + BB, data = filtered_df[,2:19])
+summary(lm.ball2)
+```
+
+What we can learn from this model is that for every additional G played, which requires a player to be healthy (a form of performance) his salary should increase $81,748. For every R, he is compensated with $116,584. Apparently more AB are not a contributor to a greater salary, but the amount is low enough to be perhaps ignored. It is notable that SB have a negative impact on Salary and this is consistent with our observations of correlation above. Perhaps SB are related to more injuries and thus this trait is not valued by GM's. It's hard to say, however, exactly why this might be. 
+
+While we can not conclusively say that general performance is rewarded with salary since not all variables appear to be represented in a statistically significant model, the data does seem to indicate that some positive relationship does exist. We can say there is a positive relationship with R, and this does make a fair bit of intuitive sense. Perhaps with some of the improvements in data quality identified in the Data Preparation section, we might be able to find more conclusive answers.
+
+##Question 2 - Does the data support the idea that there are players specialized in different kinds of play? (50 pts)
+
+
+In order to identify groups, we might use k-means. Prior to using k-means we should use PCA to create uncorrelated variables. Here, we compute Principal Components (centered and scaled), and review a visual representation of the results. By using the first four PCs, we capture 70% of the variance. The plot helps to illustrate this point.
+
+```{r PCA}
+
+ball.pca <- prcomp(filtered_df[,2:18], center = TRUE, scale = TRUE)
+summary(ball.pca)
+plot(ball.pca, type = "l")
+
+```
+
+By exploring the biplot below, we can observe the similarities of the variables used in the PCA. 
+
+SH, SB, X3b, and CS are similar.
+
+AB, G, HBP, X2b, SF, R, GIDP are similar.
+
+RBI, BB, IBB, HR, and SO are similar.
+
+```{r PCAVIZ}
+princomp_ball <- predict(ball.pca, newdata = filtered_df[,2:19])
+princomp_salry <- as.data.frame(cbind(princomp_ball[,1:10], SALARY =filtered_df$SALARY))
+
+g <- ggbiplot(ball.pca, obs.scale = 2, var.scale = 2, ellipse = TRUE, circle = TRUE)
+g+scale_color_discrete(name = '')
+```
+
+Now that we have investigated the PCA, we can move onto the K-Means clustering. We search for 4 groups.
+
+```{r KMEANS}
+kmean.ball <- kmeans(ball.pca$x[,1:4], 4, nstart = 25, iter.max = 1000)
+kmean.ball
+
+```
+
+Let's take another look at the pairs plots and this time class them by the new k-means groups (1-4)
+
+```{r KMEANSVISUALS, fig.width=10}
+transparentTheme(trans = .6)
+featurePlot(x = filtered_df[, regVar[1:5]],
+            y = as.factor(kmean.ball$cluster),
+            plot = "pairs",
+            main="k-means pair plots",
+            auto.key = list(columns = 4))
+
+featurePlot(x = filtered_df[, regVar[6:11]],
+            y = as.factor(kmean.ball$cluster),
+            plot = "pairs",
+            main="k-means pair plots",
+            auto.key = list(columns = 4))
+
+featurePlot(x = filtered_df[, regVar[12:17]],
+            y = as.factor(kmean.ball$cluster),
+            plot = "pairs",
+            span = .5,
+            main="k-means pair plots",
+            auto.key = list(columns = 4))
+
+
+
+```
+
+The clusters appear to create relatively distinct clusters for most x,y pairs. Look for instance at the pair HR & SB. Group 1 seems to be decent HR hitters and either not base stealers or only moderately base stealers. Group 4 has very few stolen bases and very few HRs. However, Group 4 also seems to be likely to get walks or sacrifice hits. Below we look at some density plots to get a clearer picture of these groups.
+
+```{r DENSITY}
+
+featurePlot(x = filtered_df$H,
+            y = as.factor(kmean.ball$cluster),
+            plot = "density",
+            main="H Density Plot",
+            auto.key = list(columns = 4))
+
+featurePlot(x = filtered_df$HR,
+            y = as.factor(kmean.ball$cluster),
+            plot = "density",
+            main="HR Density Plot",
+            auto.key = list(columns = 4))
+
+featurePlot(x = filtered_df$SB,
+            y = as.factor(kmean.ball$cluster),
+            plot = "density",
+            main="SB Density Plot",
+            auto.key = list(columns = 4))
+
+featurePlot(x = filtered_df$SH,
+            y = as.factor(kmean.ball$cluster),
+            plot = "density",
+            main="SH Density Plot",
+            auto.key = list(columns = 4))
+
+featurePlot(x = filtered_df$SF,
+            y = as.factor(kmean.ball$cluster),
+            plot = "density",
+            main="SF Density Plot",
+            auto.key = list(columns = 4))
+
+featurePlot(x = filtered_df$R,
+            y = as.factor(kmean.ball$cluster),
+            plot = "density",
+            main="R Density Plot",
+            auto.key = list(columns = 4))
+
+featurePlot(x = filtered_df$RBI,
+            y = as.factor(kmean.ball$cluster),
+            plot = "density",
+            main="RBI Density Plot",
+            auto.key = list(columns = 4))
+
+featurePlot(x = filtered_df$BB,
+            y = as.factor(kmean.ball$cluster),
+            plot = "density",
+            main="BB Density Plot",
+            auto.key = list(columns = 4))
+
+```
+
+
+Group 1: Power hitters - hitting home runs, getting RBIs, hitting sacrafice flies but not scrafice hits
+
+Group 2: Hitters for contact and speed - hits and home runs but not as much as group 1 or 4, get RBIs, and SBs
+
+Group 3: Hitters for contact with an eye - Doesn't hit for distance, least productive at scoring runs, tend to draw walks
+
+Group 4: Heavy hitters - hit home runs but not as good at getting runs in.
+
+
+##Question 3 - Is Salary a good predictor of the probability of hitting  10 or more HRs in a season?
+
+
+The way to identify the probability of hitting 10 or more HRs in a season is to create a logistic regression. In order to do that, it's necessary to go back and create a data set appropriate for this analysis. We **do not** aggregate the data in this instance, but do filter out a minimum of 80 games, salaries over 0, and those observations with no HRs.
+
+We then go on to build train and test sets, using 70% for the train data. The results of the logistic regression are below.
+
+
+```{r LOGREG}
+
+logistic_data <- Baseball[,1:23] 
+logistic_data <- logistic_data[logistic_data$G>80 & logistic_data$SALARY>0 & logistic_data$HR>0,]
+logistic_data <- cbind(logistic_data, HITTER = as.numeric(logistic_data$HR>10))
+
+smp_size <- floor(0.7*nrow(logistic_data))
+set.seed(143)
+train_ind <- sample(seq_len(nrow(logistic_data)), size = smp_size)
+train <- logistic_data[train_ind,]
+test <- logistic_data[-train_ind,]
+
+glm.ball <- glm(formula=HITTER~SALARY, family = binomial(link = "logit"), data = logistic_data)
+summary(glm.ball)
+```
+
+
+The results are not very good. The probabilities assigned to the test data show that most observations are assigned a llikelihood of hitting 10 or more homeruns between .46 and .53 - pretty much a coin flip. Salary does not seem to be a very good predictor of hitting 10 or more HRs in a season.
+
+```{r LOGRESULTS}
+probs <- predict(glm.ball, newdata = test, type = "response")
+results <- data.frame(cbind(p = probs, HR = test$HITTER))
+describe(results)
+```
+
+##Question 4 - Design a conjoint experiment to understand the importance of different player characteristics for coaches.
+
+In order to create a conjoint experiment we might explore characteristics that GMs seem to value such as Tenure, Hit Style, Mindedness, and Passion. 
+
+The various responses for each category can be seen below.
+
+```{r Answer_4}
+
+#Create attribute list
+attribute <- list(
+    Tenure=c("Veteran", "Rookie", "Journeyman"),
+    HitStyle=c("Hits for Power", "Hits for Contact"),
+    Mindedness=c("Offensive Minded", "Defensive Minded"),
+    Passion=c("For the game", "For teammates", "For winning")
+)
+attribute
+```
+
+Below is an example of the profiles that the GMs might be expected to rank.
+
+```{r CONJOINTPROFILES}
+
+#develop profiles
+profiles <- expand.grid(attribute)
+profiles
+design <- caFactorialDesign(data = profiles,type = "fractional", cards = 10)
+
+set.seed(45)
+
+#synthesize respondent data matrix
+matrix.new <- matrix(data = 0, nrow = 50, ncol = 10)
+#iterate with sample data
+for (i in 1:nrow(matrix.new)){
+    
+    x <- sample(1:10)
+    matrix.new[i,] <- x
+}
+
+preferences <- matrix.new
+attribute_levels <- as.vector(unlist(attribute))
+
+```
+
+The results of the analysis are below. Given that synthetic data was used, it is not surprising that the model does not appear to be statistically significant. This does not stop us, however, from extracting some methodological value from the interpretation of the results. 
+
+
+
+```{r CONJOINTRESULTS}
+#Run Conjoint function
+conjoint.analysis <- Conjoint(preferences, design, attribute_levels)
+imps <- caImportance(preferences, design)
+```
+
+```{r}
+
+barplot(imps, main = "Average Importance by Factor", names.arg = c("Tenure"," HitStyle", "Mindness", "Passion"))
+```
+
+## APPENDIX: Data Dictionary
+
+**playerID       Player ID code**
+
+-- yearID         Year
+
+-- stint          player's stint (order of appearances within a season)
+
+-- teamID         Team
+
+-- lgID           League
+
+-- G              Games
+
+-- AB             At Bats
+
+-- R              Runs
+
+-- H              Hits
+
+-- 2B             Doubles
+
+-- 3B             Triples
+
+-- HR             Homeruns
+
+-- RBI            Runs Batted In
+
+-- SB             Stolen Bases
+
+-- CS             Caught Stealing
+
+-- BB             Base on Balls
+
+-- SO             Strikeouts
+
+-- IBB            Intentional walks
+
+-- HBP            Hit by pitch
+
+-- SH             Sacrifice hits
+
+-- SF             Sacrifice flies
+
+-- GIDP           Grounded into double plays
